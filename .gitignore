@@ -9,6 +9,8 @@ readme
 
 # checkpoints
 ckpt/RETFound_oct_weights.pth
+ckpt/RETFound_mae_natureOCT.pth
+ckpt/.cache/
 ckpt/RETFound_cfp_weights.pth
 ckpt/OCTCube.pth
 ckpt/mm_octcube_ir.pt

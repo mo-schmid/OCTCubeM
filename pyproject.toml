@@ -34,6 +34,8 @@ dependencies = [
     "matplotlib>=3.11.2",
     "einops>=0.8.2",
     "psutil>=7.2.2",
+    "python-dotenv>=1.2.4",
+    "huggingface-hub>=2.3.0",
 ]
 
 [tool.uv.sources]
