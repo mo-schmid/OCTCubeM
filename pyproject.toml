@@ -28,6 +28,7 @@ dependencies = [
     "monai>=1.6.1",
     "dvc>=3.67.1",
     "dvc-ssh>=4.3.0",
+    "lightning>=2.6.6",
 ]
 
 [tool.uv.sources]
