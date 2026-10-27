@@ -515,7 +515,7 @@ def load_model_retfound_flash_attn(args, model_without_ddp, convert_pos_embed=Tr
             checkpoint = {'model': preload_model.state_dict()}
             print('preload model: ', preload_model.state_dict().keys())
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
 
         if convert_pos_embed:
             # convert_spatial_pos_embed(model_without_ddp, checkpoint['model'], high_res_model=high_res_model)
