@@ -9,7 +9,7 @@ from octcubem.datamodules.base import IndexFileDataModule
 from octcubem.datamodules.readers import ImageSeriesReader
 from octcubem.transforms.defaults import standardize
 
-DATA_DIR = "Pre-training/ucsd_kermany_2018"
+DATA_DIR = "data/ucsd_kermany_2018"
 
 
 class Kermany2018DataModule(IndexFileDataModule):

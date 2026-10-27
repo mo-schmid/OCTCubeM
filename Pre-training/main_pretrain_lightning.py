@@ -71,7 +71,7 @@ def get_args_parser():
     # depth 48 (divisible by t_patch_size 3), no depth resizing; RETFound init as in the paper
     parser.set_defaults(num_frames=48, pred_t_dim=48, resume_type="retfound_2_flash_attn", output_dir=None)
     # the folder holding Kermany's index.csv, not the original's ImageFolder root
-    parser.set_defaults(kermany_data_dir="ucsd_kermany_2018")
+    parser.set_defaults(kermany_data_dir="../data/ucsd_kermany_2018")
     # SPL's K schedule of the original launch script, not of its parser (0.9 -> 0.3)
     parser.set_defaults(K_max=0.3, K_min=0.15)
     return parser
