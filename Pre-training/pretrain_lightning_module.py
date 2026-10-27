@@ -6,20 +6,23 @@
 
 # Lightning port of `train_one_epoch_joint` / `eval_one_epoch` in engine_pretrain.py.
 # With `--joint_2d`, every step adds the MAE loss of a batch of single B-scans at
-# `high_res_input_size` to the 3D loss, as the original does; SPL is not ported yet.
-# In the 3D path, `pre_mask` is ignored by `MaskedAutoencoderViT.forward` and
-# `frame_loss` only feeds SPL, so the 3D objective below is the same as the original one.
+# `high_res_input_size` to the 3D loss, as the original does. With `--self_paced`, the
+# 3D per-patch losses score the B-scans of the train volumes, and after every epoch the
+# 2D stream is narrowed to the hardest `K` fraction (SPL). In the 3D path, `pre_mask`
+# is ignored by `MaskedAutoencoderViT.forward`, so its computation is left out.
 
 import math
 import os
 
+import numpy as np
 import lightning.pytorch as pl
 import torch
 
 import custom_util.lr_sched as lr_sched
 import custom_util.misc as misc
 import models_mae_joint_res_flash_attn as models_mae
-from main_pretrain_oph_joint_2d512_flash_attn import mask_ratio_2d_scheduler
+from main_pretrain_oph_joint_2d512_flash_attn import K_scheduler, mask_ratio_2d_scheduler
+from octcubem.datamodules.self_paced import slice_losses
 from octcubem.transforms.defaults import octcube_2d_input
 
 # the 2D batch parts of a joint training batch, see `JointPretrainDataModule`
@@ -62,7 +65,11 @@ class MAEPretrainModule(pl.LightningModule):
         loss, _, _ = self.model(
             samples,
             mask_ratio=self.args.mask_ratio,
+            frame_loss=self.args.self_paced,
         )
+        if self.args.self_paced:
+            loss, patch_losses = loss
+            self._score_bscans(batch["3d"], patch_losses)
         # `train_loss` stays the 3D loss alone, comparable with 3D-only runs
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=samples.shape[0])
 
@@ -84,6 +91,45 @@ class MAEPretrainModule(pl.LightningModule):
         self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"], on_step=True, on_epoch=False)
         self.log("mask_ratio", self.args.mask_ratio, on_step=True, on_epoch=False)
         return loss
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        # the selection for the next epoch is made right after its last training batch,
+        # so validation and the checkpoints of this epoch already see it
+        if self.args.self_paced and batch_idx + 1 == self.trainer.num_training_batches:
+            self._update_self_paced_selection()
+
+    def _score_bscans(self, batch_3d, patch_losses):
+        """Records the 3D per-patch losses as the hardness of the B-scans they cover."""
+        hardness = self.trainer.datamodule.hardness
+        patch_losses = patch_losses.detach().float().cpu().numpy()
+        sample_ids, losses = [], []
+        for sample_id, flipped, sample_losses in zip(batch_3d["sample_id"], batch_3d["depth_flipped"], patch_losses):
+            row = hardness.rows.get(sample_id)
+            if row is None:
+                continue
+            sample_ids.append(sample_id)
+            losses.append(slice_losses(sample_losses, bool(flipped), int(hardness.num_slices[row]), self.args.num_frames, self.args.t_patch_size))
+        hardness.update(sample_ids, losses)
+
+    def _update_self_paced_selection(self):
+        """Merges this epoch's hardness across processes and selects the hardest `K` for the next epoch."""
+        hardness = self.trainer.datamodule.hardness
+        hardness.merge(lambda tensor: self.trainer.strategy.reduce(tensor.to(self.device), reduce_op="sum"))
+        K_for_spl = K_scheduler(
+            self.current_epoch,
+            K_max=self.args.K_max,
+            K_min=self.args.K_min,
+            all_epoch=self.args.epochs,
+            warmup_epochs=self.args.warmup_epochs,
+            epoch_offset=self.args.epoch_offset,
+        )
+        hardness.select_hardest(K_for_spl)
+        self.log("spl_K", K_for_spl, on_step=False, on_epoch=True, batch_size=1)
+        self.log("spl_selected", float(hardness.num_selected), on_step=False, on_epoch=True, batch_size=1)
+        # the original's `all_image_dict-XX.pkl`: the state the next epoch starts from
+        if self.args.output_dir and self.trainer.is_global_zero:
+            path = os.path.join(self.args.output_dir, "spl_hardness-{:02d}.npz".format(self.current_epoch + 1))
+            np.savez_compressed(path, sample_ids=np.asarray(hardness.sample_ids), hardness=hardness.hardness, selection=hardness.selection)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         # a joint datamodule runs one val loader per source: 3D first, then the 2D ones

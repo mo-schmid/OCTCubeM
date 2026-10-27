@@ -21,7 +21,9 @@ class JointPretrainDataModule(pl.LightningDataModule):
     2D ones batch `batch_size_2d` B-scans.
 
     The batch sizes the wrapped datamodules were created with are overridden: the
-    volume batch size is kept, the 2D ones are set from `batch_size_2d`.
+    volume batch size is kept, the 2D ones are set from `batch_size_2d`. The split is
+    recomputed whenever the train loader is built, as the alleye pool shrinks under
+    self-paced learning; `hardness` is the alleye datamodule's `HardnessTable` then.
     """
 
     def __init__(
@@ -41,6 +43,12 @@ class JointPretrainDataModule(pl.LightningDataModule):
         self.train_batch_sizes_2d = None
 
     @property
+    def hardness(self):
+        """The alleye B-scans' `HardnessTable` under self-paced learning, else `None`."""
+        bscans = self.sources.get("2d_alleye")
+        return None if bscans is None else bscans.hardness
+
+    @property
     def val_names(self) -> list[str]:
         """The source each val loader reads, by `dataloader_idx`."""
         return list(self.sources)
@@ -50,7 +58,6 @@ class JointPretrainDataModule(pl.LightningDataModule):
             # the wrapped datamodules size their epochs from the trainer's world size
             dm.trainer = self.trainer
             dm.setup(stage)
-        self.train_batch_sizes_2d = self._split_batch_size_2d()
 
     def _split_batch_size_2d(self) -> dict[str, int]:
         batch_size = self.hparams.batch_size_2d
@@ -62,7 +69,7 @@ class JointPretrainDataModule(pl.LightningDataModule):
         fraction = self.hparams.kermany_fraction
         if fraction is None:
             num_kermany = len(self.sources["2d_kermany"].train_dataset)
-            num_bscans = self.sources["2d_alleye"]._train_len
+            num_bscans = self.sources["2d_alleye"].num_train_bscans
             fraction = num_kermany / (num_kermany + num_bscans)
         # both sources stay in every batch, however small the batch
         num_kermany = min(max(round(batch_size * fraction), 1), batch_size - 1)
@@ -70,6 +77,7 @@ class JointPretrainDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         steps = self.sources["3d"]._steps_per_epoch()
+        self.train_batch_sizes_2d = self._split_batch_size_2d()
         loaders = {"3d": self.sources["3d"].train_dataloader()}
         for name, batch_size in self.train_batch_sizes_2d.items():
             dm = self.sources[name]
@@ -83,6 +91,13 @@ class JointPretrainDataModule(pl.LightningDataModule):
             dm = self.sources[name]
             loaders.append(_with_batch_size(dm, self.hparams.batch_size_2d, dm.val_dataloader))
         return loaders
+
+    def state_dict(self) -> dict:
+        return {name: dm.state_dict() for name, dm in self.sources.items()}
+
+    def load_state_dict(self, state_dict: dict):
+        for name, state in state_dict.items():
+            self.sources[name].load_state_dict(state)
 
     def on_after_batch_transfer(self, batch, dataloader_idx: int):
         # a training batch holds one batch per source, a val batch is one source's

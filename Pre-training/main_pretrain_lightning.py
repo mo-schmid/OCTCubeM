@@ -7,8 +7,9 @@
 # Lightning version of main_pretrain_oph_joint_2d512_flash_attn.py, pre-training
 # OCTCube on the alleye-macula webdataset. 3D-only by default; `--joint_2d` adds the
 # original's 2D branch on single B-scans of the train volumes (plus Kermany with
-# `--use_kermany`), without SPL so far. Arguments are those of the original script,
-# plus the dataset/Trainer/W&B ones added in `get_args_parser` below.
+# `--use_kermany`), and `--self_paced` its self-paced learning on the alleye B-scans.
+# Arguments are those of the original script, plus the dataset/Trainer/W&B ones added
+# in `get_args_parser` below.
 #
 # Launch with srun (one task per GPU); Lightning picks up the SLURM environment.
 
@@ -52,6 +53,8 @@ def get_args_parser():
     parser.add_argument("--bscans_per_volume", default=None, type=int, help="B-scans drawn per volume and visit; default all")
     parser.add_argument("--bscan_shuffle_buffer", default=500, type=int)
     parser.add_argument("--kermany_cache_dir", default="auto", type=str, help="decoded-image cache; 'auto' is $TMPDIR under SLURM")
+    parser.add_argument("--self_paced", action="store_true", help="narrow the alleye 2D pool to the hardest K fraction each epoch (needs --joint_2d)")
+    parser.add_argument("--spl_init_fraction", default=0.2, type=float, help="random fraction of B-scans in the first epoch")
     # run directory
     parser.add_argument("--output_root", default=str(OUTPUT_ROOT), type=str, help="every run gets its own directory in here, unless --output_dir is given")
     parser.add_argument("--run_name", default="octcube_pretrain", type=str, help="the run directory is <run_name>_<timestamp>")
@@ -69,6 +72,8 @@ def get_args_parser():
     parser.set_defaults(num_frames=48, pred_t_dim=48, resume_type="retfound_2_flash_attn", output_dir=None)
     # the folder holding Kermany's index.csv, not the original's ImageFolder root
     parser.set_defaults(kermany_data_dir="ucsd_kermany_2018")
+    # SPL's K schedule of the original launch script, not of its parser (0.9 -> 0.3)
+    parser.set_defaults(K_max=0.3, K_min=0.15)
     return parser
 
 
@@ -109,9 +114,11 @@ def build_datamodule(args):
         train_augment=FlipAugment(),
     )
     if not args.joint_2d:
-        if args.use_kermany:
-            raise ValueError("--use_kermany needs --joint_2d")
+        if args.use_kermany or args.self_paced:
+            raise ValueError("--use_kermany and --self_paced need --joint_2d")
         return volumes
+    if args.self_paced and args.pred_t_dim != args.num_frames:
+        raise ValueError("--self_paced maps per-patch losses to B-scans, which needs --pred_t_dim == --num_frames")
 
     # OCTCube's 2D transform: bicubic resize to the high-res input size, no augmentation;
     # the 2D batch size is set by the joint datamodule
@@ -125,6 +132,9 @@ def build_datamodule(args):
         image_size=args.high_res_input_size,
         bscans_per_volume=args.bscans_per_volume,
         bscan_shuffle_buffer=args.bscan_shuffle_buffer,
+        self_paced=args.self_paced,
+        spl_init_fraction=args.spl_init_fraction,
+        spl_seed=args.seed,
     )
     kermany = None
     if args.use_kermany:
@@ -190,6 +200,8 @@ def main(args):
         logger=logger,
         callbacks=callbacks,
         default_root_dir=args.output_dir,
+        # SPL changes the 2D selection after every epoch, which a new train loader picks up
+        reload_dataloaders_every_n_epochs=1 if args.self_paced else 0,
         log_every_n_steps=20,
     )
 
