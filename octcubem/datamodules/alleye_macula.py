@@ -4,14 +4,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from retimod.data.datamodules.webdataset_base import WebDatasetDataModule
-from retimod.data.registry import register_datamodule
-from retimod.data.transforms.defaults import InPlaneAugment, standardize
+from octcubem.datamodules.webdataset_base import WebDatasetDataModule
+from octcubem.transforms.defaults import InPlaneAugment, standardize
 
 DATA_DIR = "data/alleye-macula_n100"
 
 
-@register_datamodule("alleye_macula_n100")
 class AlleyeMaculaDataModule(WebDatasetDataModule):
     """Streaming MAE-pretraining datamodule for the alleye-macula dataset.
 
@@ -30,6 +28,7 @@ class AlleyeMaculaDataModule(WebDatasetDataModule):
         train_folds=(0,1,2,3,4,5,6,7),
         val_folds=(8,),
         test_folds=(9,),
+        resize_mode: str = "area",
         **kwargs,
     ):
         super().__init__(
@@ -40,6 +39,7 @@ class AlleyeMaculaDataModule(WebDatasetDataModule):
             train_folds=train_folds,
             val_folds=val_folds,
             test_folds=test_folds,
+            resize_mode=resize_mode,
             **kwargs,
         )
 
@@ -64,7 +64,11 @@ class AlleyeMaculaDataModule(WebDatasetDataModule):
     def _build_preprocess(self) -> list:
         # the decoded array has no metadata to say it lacks a channel axis
         return standardize(
-            ["image"], self.hparams.num_slices, self.hparams.image_size, channel_dim="no_channel"
+            ["image"],
+            self.hparams.num_slices,
+            self.hparams.image_size,
+            channel_dim="no_channel",
+            resize_mode=self.hparams.resize_mode,
         )
 
     def _default_train_augment(self) -> InPlaneAugment:

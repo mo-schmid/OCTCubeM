@@ -23,6 +23,7 @@ def standardize(
     image_size: int | tuple[int, int],
     mask_key: str | None = None,
     channel_dim: str | int | None = None,
+    resize_mode: str = "area",
 ) -> list[mt.Transform]:
     """Geometry every sample goes through: channel-first, `depth` B-scans, `image_size` in-plane, uint8.
 
@@ -34,6 +35,8 @@ def standardize(
             and returned as a long `(D, H, W)` class-id tensor.
         channel_dim: Forwarded to `EnsureChannelFirstD`, e.g. `"no_channel"` for a raw array
             that carries no channel metadata.
+        resize_mode: Interpolation of the in-plane image resize; OCTCube's own
+            pipeline uses `"trilinear"`, which with depth untouched is bilinear in-plane.
     """
     height, width = (image_size, image_size) if isinstance(image_size, int) else image_size
     image_keys = [key for key in keys if key != mask_key]
@@ -43,7 +46,7 @@ def standardize(
         # select the central B-scans as OCTCube does, zero-padding volumes with fewer
         # than `depth` B-scans so every sample has the same size
         mt.ResizeWithPadOrCropD(keys=keys, spatial_size=(depth, -1, -1)),
-        mt.ResizeD(keys=image_keys, spatial_size=(-1, height, width)),
+        mt.ResizeD(keys=image_keys, spatial_size=(-1, height, width), mode=resize_mode),
         # `ResizeD` upcasts to float32 -- back to uint8, the dtype the batch ships in
         ToUint8D(keys=image_keys),
     ]

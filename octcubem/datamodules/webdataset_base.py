@@ -9,7 +9,7 @@ import torch
 import webdataset as wds
 from monai.data import list_data_collate
 
-from retimod.data.transforms.defaults import normalize
+from octcubem.transforms.defaults import normalize
 
 
 class WebDatasetDataModule(pl.LightningDataModule):
@@ -143,10 +143,16 @@ class WebDatasetDataModule(pl.LightningDataModule):
             pipeline = pipeline.shuffle(self.hparams.shard_shuffle_buffer)
         pipeline = pipeline.map(self._decode).map(transform)
 
+        # a read-once shard set is split across workers, and a worker left without a
+        # shard makes webdataset raise -- so never start more workers than shards
+        num_workers = self.hparams.num_workers
+        if not resampled:
+            num_workers = min(num_workers, len(shards))
+
         loader = wds.WebLoader(
             pipeline,
             batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
+            num_workers=num_workers,
             collate_fn=self._collate,
             worker_init_fn=self._make_worker_init(transform),
             pin_memory=True,
