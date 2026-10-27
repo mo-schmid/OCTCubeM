@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 # Lightning version of main_pretrain_oph_joint_2d512_flash_attn.py, pre-training
-# OCTCube on the alleye-macula webdataset. 3D-only for now: the 2D branch (and SPL)
-# of the original is not ported yet. Arguments are those of the original script,
+# OCTCube on the alleye-macula webdataset. 3D-only by default; `--joint_2d` adds the
+# original's 2D branch on single B-scans of the train volumes (plus Kermany with
+# `--use_kermany`), without SPL so far. Arguments are those of the original script,
 # plus the dataset/Trainer/W&B ones added in `get_args_parser` below.
 #
 # Launch with srun (one task per GPU); Lightning picks up the SLURM environment.
@@ -25,6 +26,9 @@ from lightning.pytorch.strategies import DDPStrategy
 import custom_util.misc as misc
 from main_pretrain_oph_joint_2d512_flash_attn import get_args_parser as get_original_args_parser
 from octcubem.datamodules.alleye_macula import AlleyeMaculaDataModule
+from octcubem.datamodules.alleye_macula_bscans import AlleyeMaculaBscanDataModule
+from octcubem.datamodules.joint_pretrain import JointPretrainDataModule
+from octcubem.datamodules.kermany import Kermany2018DataModule
 from octcubem.transforms.defaults import FlipAugment
 from pretrain_lightning_module import MAEPretrainModule
 
@@ -39,6 +43,15 @@ def get_args_parser():
     parser.add_argument("--val_folds", default=[8], type=int, nargs="+")
     parser.add_argument("--test_folds", default=[9], type=int, nargs="+")
     parser.add_argument("--steps_per_epoch", default=None, type=int, help="per-rank steps per epoch; default one pass over the train folds")
+    # 2D branch; the 2D batch size, input size, mask ratio schedule are the original's arguments
+    parser.add_argument("--joint_2d", action="store_true", help="add the 2D loss on single B-scans of the train volumes")
+    parser.add_argument("--use_kermany", action="store_true", help="also draw 2D samples from Kermany (needs --joint_2d)")
+    parser.add_argument("--kermany_fraction", default=None, type=float, help="Kermany's share of the 2D batch; default its share of the pooled images")
+    parser.add_argument("--norm_2d", default="imagenet", choices=["imagenet", "unit"], help="ImageNet-normalise the 2D input as the original, or keep it in [0, 1] like the 3D input")
+    parser.add_argument("--num_workers_2d", default=None, type=int, help="workers per 2D loader; default --num_workers")
+    parser.add_argument("--bscans_per_volume", default=None, type=int, help="B-scans drawn per volume and visit; default all")
+    parser.add_argument("--bscan_shuffle_buffer", default=500, type=int)
+    parser.add_argument("--kermany_cache_dir", default="auto", type=str, help="decoded-image cache; 'auto' is $TMPDIR under SLURM")
     # run directory
     parser.add_argument("--output_root", default=str(OUTPUT_ROOT), type=str, help="every run gets its own directory in here, unless --output_dir is given")
     parser.add_argument("--run_name", default="octcube_pretrain", type=str, help="the run directory is <run_name>_<timestamp>")
@@ -54,6 +67,8 @@ def get_args_parser():
     parser.add_argument("--no_wandb", action="store_true")
     # depth 48 (divisible by t_patch_size 3), no depth resizing; RETFound init as in the paper
     parser.set_defaults(num_frames=48, pred_t_dim=48, resume_type="retfound_2_flash_attn", output_dir=None)
+    # the folder holding Kermany's index.csv, not the original's ImageFolder root
+    parser.set_defaults(kermany_data_dir="ucsd_kermany_2018")
     return parser
 
 
@@ -78,17 +93,8 @@ def resolve_run_timestamp():
     return os.environ["OCTCUBE_RUN_TIMESTAMP"]
 
 
-def main(args):
-    if args.output_dir is None:
-        run_dir_name = "{}_{}".format(args.run_name, resolve_run_timestamp())
-        args.output_dir = os.path.join(args.output_root, run_dir_name)
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    if not args.log_dir:
-        args.log_dir = args.output_dir
-
-    cudnn.benchmark = True
-
-    datamodule = AlleyeMaculaDataModule(
+def build_datamodule(args):
+    volumes = AlleyeMaculaDataModule(
         data_dir=args.data_dir,
         train_folds=args.train_folds,
         val_folds=args.val_folds,
@@ -102,6 +108,52 @@ def main(args):
         resize_mode="trilinear",
         train_augment=FlipAugment(),
     )
+    if not args.joint_2d:
+        if args.use_kermany:
+            raise ValueError("--use_kermany needs --joint_2d")
+        return volumes
+
+    # OCTCube's 2D transform: bicubic resize to the high-res input size, no augmentation;
+    # the 2D batch size is set by the joint datamodule
+    num_workers_2d = args.num_workers if args.num_workers_2d is None else args.num_workers_2d
+    bscans = AlleyeMaculaBscanDataModule(
+        data_dir=args.data_dir,
+        train_folds=args.train_folds,
+        val_folds=args.val_folds,
+        test_folds=args.test_folds,
+        num_workers=num_workers_2d,
+        image_size=args.high_res_input_size,
+        bscans_per_volume=args.bscans_per_volume,
+        bscan_shuffle_buffer=args.bscan_shuffle_buffer,
+    )
+    kermany = None
+    if args.use_kermany:
+        kermany = Kermany2018DataModule(
+            data_dir=args.kermany_data_dir,
+            num_workers=num_workers_2d,
+            image_size=args.high_res_input_size,
+            cache_dir=args.kermany_cache_dir,
+        )
+    return JointPretrainDataModule(
+        volumes,
+        bscans=bscans,
+        kermany=kermany,
+        batch_size_2d=args.batch_size_2d,
+        kermany_fraction=args.kermany_fraction,
+    )
+
+
+def main(args):
+    if args.output_dir is None:
+        run_dir_name = "{}_{}".format(args.run_name, resolve_run_timestamp())
+        args.output_dir = os.path.join(args.output_root, run_dir_name)
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    if not args.log_dir:
+        args.log_dir = args.output_dir
+
+    cudnn.benchmark = True
+
+    datamodule = build_datamodule(args)
 
     if args.no_wandb:
         logger = False
@@ -128,7 +180,7 @@ def main(args):
         devices=args.devices,
         num_nodes=args.num_nodes,
         # the high-res (2D) patch embed of the joint model gets no gradient in 3D-only training
-        strategy=DDPStrategy(find_unused_parameters=True),
+        strategy=DDPStrategy(find_unused_parameters=not args.joint_2d),
         # shards are split across ranks by the datamodule itself
         use_distributed_sampler=False,
         precision="32-true" if args.fp32 else "16-mixed",
