@@ -1,0 +1,13 @@
+md5: 7b207d3149d58263d1deef23ec60e060
+frozen: true
+deps:
+- path: data/processed
+  repo:
+    url: git@github.com:aimi-lab/UCSD_Kermany_2018.git
+    rev_lock: 531df536fc1671db12d05728d3789ee0a89d2496
+outs:
+- md5: d804aa7575bd9974a5e79ef8aed744f7.dir
+  size: 7201088537
+  nfiles: 109310
+  hash: md5
+  path: ucsd_kermany_2018
