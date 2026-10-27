@@ -178,3 +178,6 @@ dmypy.json
 
 IDRiD_data
 
+
+# Lightning pre-training runs
+outputs/
