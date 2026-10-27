@@ -1,0 +1,14 @@
+md5: 8f39fd82a1227320aa9f1bd19a22caec
+frozen: true
+deps:
+- path: data/processed/alleye-macula_n100
+  repo:
+    url: git@github.com:mo-schmid/alleye-macula-oct.git
+    rev: v1.0.0
+    rev_lock: efabde73dc5037312a5caf9b7a3df874086d0f9c
+outs:
+- md5: 3cbe64dfbff727d4236c29e6229b8817.dir
+  size: 1245214195
+  nfiles: 11
+  hash: md5
+  path: alleye-macula_n100
