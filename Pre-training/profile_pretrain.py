@@ -8,6 +8,9 @@
 # It runs the step `MAEPretrainModule` runs under `Trainer(precision="16-mixed")`:
 # forward, loss, backward and AdamW step under fp16 autocast with a grad scaler. The
 # data pipeline is left out on purpose -- random volumes are generated on the GPU.
+# With `--batch_sizes_2d`, each step also runs the 2D branch of `--joint_2d` training
+# on that many random B-scans at `--high_res_input_size`, at the lowest 2D mask ratio
+# (`--mask_ratio_2d_min`), which keeps the most patches and so needs the most memory.
 #
 # Takes the arguments of main_pretrain_lightning.py (model, input size, frames,
 # mask ratio, ...), plus the profiling ones below. Results go to
@@ -15,6 +18,7 @@
 
 import argparse
 import datetime
+import itertools
 import json
 import os
 import time
@@ -25,6 +29,7 @@ import torch
 import custom_util.misc as misc
 import models_mae_joint_res_flash_attn as models_mae
 from main_pretrain_lightning import get_args_parser as get_pretrain_args_parser
+from octcubem.transforms.defaults import octcube_2d_input
 
 PROFILING_ROOT = Path(__file__).resolve().parents[1] / "outputs" / "profiling"
 
@@ -32,6 +37,7 @@ PROFILING_ROOT = Path(__file__).resolve().parents[1] / "outputs" / "profiling"
 def get_args_parser():
     parser = argparse.ArgumentParser("OCTCube pre-training profiling", parents=[get_pretrain_args_parser()], conflict_handler="resolve")
     parser.add_argument("--batch_sizes", default=[1, 2, 4], type=int, nargs="+", help="per-GPU batch sizes to time")
+    parser.add_argument("--batch_sizes_2d", default=[0], type=int, nargs="+", help="per-GPU 2D batch sizes to time with each batch size; 0 is 3D only")
     parser.add_argument("--warmup_steps", default=5, type=int)
     parser.add_argument("--timed_steps", default=20, type=int)
     parser.add_argument("--trace_steps", default=3, type=int, help="steps recorded by torch.profiler at the first batch size; 0 disables it")
@@ -46,12 +52,23 @@ def synthetic_batch(args, batch_size, device):
     return torch.rand(batch_size, args.in_chans, args.num_frames, *input_size, device=device)
 
 
-def train_step(model, optimizer, scaler, samples, args, timings=None):
+def synthetic_batch_2d(args, batch_size, device):
+    """Random B-scans as `MAEPretrainModule` feeds them: 3 identical frames, one temporal patch."""
+    if batch_size == 0:
+        return None
+    image = torch.rand(batch_size, args.in_chans, 1, args.high_res_input_size, args.high_res_input_size, device=device)
+    return octcube_2d_input(image)
+
+
+def train_step(model, optimizer, scaler, samples, args, timings=None, samples_2d=None):
     """One step as in `MAEPretrainModule.training_step`, with per-phase CUDA timings."""
     events = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
     events[0].record()
     with torch.autocast("cuda", dtype=torch.float16, enabled=not args.fp32):
         loss, _, _ = model(samples, mask_ratio=args.mask_ratio)
+        if samples_2d is not None:
+            loss_2d, _, _ = model(samples_2d, mask_ratio=args.mask_ratio_2d_min)
+            loss = loss + loss_2d
     events[1].record()
     scaler.scale(loss).backward()
     events[2].record()
@@ -71,23 +88,25 @@ def train_step(model, optimizer, scaler, samples, args, timings=None):
     return loss
 
 
-def profile_batch_size(model, optimizer, scaler, args, batch_size, device):
+def profile_batch_size(model, optimizer, scaler, args, batch_size, batch_size_2d, device):
     samples = synthetic_batch(args, batch_size, device)
+    samples_2d = synthetic_batch_2d(args, batch_size_2d, device)
     torch.cuda.reset_peak_memory_stats()
     for _ in range(args.warmup_steps):
-        train_step(model, optimizer, scaler, samples, args)
+        train_step(model, optimizer, scaler, samples, args, samples_2d=samples_2d)
     torch.cuda.synchronize()
 
     timings = {"forward": [], "backward": [], "optimizer": []}
     start = time.perf_counter()
     for _ in range(args.timed_steps):
-        loss = train_step(model, optimizer, scaler, samples, args, timings)
+        loss = train_step(model, optimizer, scaler, samples, args, timings, samples_2d=samples_2d)
     torch.cuda.synchronize()
     step_s = (time.perf_counter() - start) / args.timed_steps
 
     volumes_per_s = batch_size / step_s
     return {
         "batch_size": batch_size,
+        "batch_size_2d": batch_size_2d,
         "step_ms": step_s * 1000,
         "forward_ms": sum(timings["forward"]) / len(timings["forward"]),
         "backward_ms": sum(timings["backward"]) / len(timings["backward"]),
@@ -135,18 +154,18 @@ def main(args):
         args.in_chans, args.num_frames, args.input_size, args.mask_ratio, "fp32" if args.fp32 else "fp16 autocast"))
 
     results = []
-    for batch_size in args.batch_sizes:
+    for batch_size, batch_size_2d in itertools.product(args.batch_sizes, args.batch_sizes_2d):
         try:
-            result = profile_batch_size(model, optimizer, scaler, args, batch_size, device)
+            result = profile_batch_size(model, optimizer, scaler, args, batch_size, batch_size_2d, device)
         except torch.cuda.OutOfMemoryError:
-            print("batch size {}: out of memory".format(batch_size))
-            results.append({"batch_size": batch_size, "oom": True})
+            print("batch size {} + 2D {}: out of memory".format(batch_size, batch_size_2d))
+            results.append({"batch_size": batch_size, "batch_size_2d": batch_size_2d, "oom": True})
             optimizer.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
             continue
         results.append(result)
         print(
-            "batch size {batch_size}: {step_ms:.0f} ms/step (fwd {forward_ms:.0f} / bwd {backward_ms:.0f} / "
+            "batch size {batch_size} + 2D {batch_size_2d}: {step_ms:.0f} ms/step (fwd {forward_ms:.0f} / bwd {backward_ms:.0f} / "
             "optim {optimizer_ms:.0f}), {volumes_per_s:.2f} volumes/s, epoch of {n} volumes ~{epoch_h_1gpu:.2f} h "
             "on 1 GPU, peak memory {peak_mem_gb:.1f} GB".format(n=args.train_volumes, **result)
         )
