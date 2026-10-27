@@ -38,7 +38,7 @@ class Kermany2018DataModule(IndexFileDataModule):
         data_dir=DATA_DIR,
         image_size: int | tuple[int, int] = 512,
         steps_per_epoch: int | None = None,
-        resize_mode: str = "trilinear",
+        resize_mode: str = "bicubic",
         **kwargs,
     ):
         super().__init__(

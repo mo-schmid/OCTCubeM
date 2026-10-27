@@ -141,7 +141,9 @@ class WebDatasetDataModule(pl.LightningDataModule):
         )
         if resampled:
             pipeline = pipeline.shuffle(self.hparams.shard_shuffle_buffer)
-        pipeline = pipeline.map(self._decode).map(transform)
+        pipeline = pipeline.map(self._decode)
+        pipeline = self._expand(pipeline, training=resampled)
+        pipeline = pipeline.map(transform)
 
         # a read-once shard set is split across workers, and a worker left without a
         # shard makes webdataset raise -- so never start more workers than shards
@@ -232,6 +234,13 @@ class WebDatasetDataModule(pl.LightningDataModule):
         MONAI dictionary transform expects, e.g. `{"image": np.ndarray}`.
         """
         raise NotImplementedError
+
+    def _expand(self, pipeline: wds.WebDataset, training: bool) -> wds.WebDataset:
+        """Stages between `_decode` and the transform, e.g. splitting a volume into B-scans
+        with `pipeline.compose(...)`; `training` is set for the resampled train stream.
+        The default passes the decoded samples through.
+        """
+        return pipeline
 
     def _build_preprocess(self) -> list:
         """The deterministic per-sample transforms after `_decode`, typically `transforms.defaults.standardize`."""

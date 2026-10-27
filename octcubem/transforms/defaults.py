@@ -15,6 +15,12 @@ from collections.abc import Sequence
 
 import monai.transforms as mt
 import torch
+import torch.nn.functional as F
+from monai.data import MetaTensor
+
+# torchvision's `Normalize` constants, which OCTCube's 2D branch applies to its RGB-converted B-scans
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 def standardize(
@@ -37,16 +43,23 @@ def standardize(
             that carries no channel metadata.
         resize_mode: Interpolation of the in-plane image resize; OCTCube's own
             pipeline uses `"trilinear"`, which with depth untouched is bilinear in-plane.
+            `"bicubic"` resizes every B-scan antialiased as PIL does (`InPlaneBicubicResizeD`),
+            as OCTCube's 2D branch does.
     """
     height, width = (image_size, image_size) if isinstance(image_size, int) else image_size
     image_keys = [key for key in keys if key != mask_key]
+
+    if resize_mode == "bicubic":
+        resize = InPlaneBicubicResizeD(keys=image_keys, size=(height, width))
+    else:
+        resize = mt.ResizeD(keys=image_keys, spatial_size=(-1, height, width), mode=resize_mode)
 
     transforms = [
         mt.EnsureChannelFirstD(keys=keys, channel_dim=channel_dim),
         # select the central B-scans as OCTCube does, zero-padding volumes with fewer
         # than `depth` B-scans so every sample has the same size
         mt.ResizeWithPadOrCropD(keys=keys, spatial_size=(depth, -1, -1)),
-        mt.ResizeD(keys=image_keys, spatial_size=(-1, height, width), mode=resize_mode),
+        resize,
         # `ResizeD` upcasts to float32 -- back to uint8, the dtype the batch ships in
         ToUint8D(keys=image_keys),
     ]
@@ -75,6 +88,52 @@ def normalize(batch: dict, keys: Sequence[str], max_value: float = 255.0) -> dic
         image = image / max_value
         batch[key] = image.clamp(0.0, 1.0)
     return batch
+
+
+def octcube_2d_input(image: torch.Tensor, imagenet_normalize: bool = True) -> torch.Tensor:
+    """Turns a `[0, 1]` batch of single B-scans `(B, 1, 1, H, W)` into OCTCube's 2D model input `(B, 1, 3, H, W)`.
+
+    OCTCube's 2D branch loads a B-scan as RGB, so `ToTensor` makes 3 identical channels,
+    which the model then reads as 3 frames -- one temporal patch. `Normalize` with the
+    ImageNet constants follows, which makes the 3 frames differ slightly.
+    """
+    image = image.expand(-1, -1, 3, -1, -1)
+    if not imagenet_normalize:
+        return image
+    mean = image.new_tensor(IMAGENET_MEAN).view(1, 1, 3, 1, 1)
+    std = image.new_tensor(IMAGENET_STD).view(1, 1, 3, 1, 1)
+    return (image - mean) / std
+
+
+class InPlaneBicubicResizeD(mt.MapTransform):
+    """Resizes every B-scan of a `(C, D, H, W)` image to `size`, bicubic and antialiased.
+
+    Matches PIL's `resize(..., BICUBIC)`, which OCTCube's 2D branch uses through
+    torchvision's `Resize(interpolation=3)` -- MONAI's `ResizeD` has no antialiased
+    bicubic for a 3D image. Returns float; follow it with `ToUint8D`.
+    """
+
+    def __init__(self, keys: Sequence[str], size: tuple[int, int]):
+        super().__init__(keys)
+        self.size = tuple(size)
+
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            image = d[key]
+            if isinstance(image, MetaTensor):
+                image = image.as_tensor()
+            image = torch.as_tensor(image).float()
+            channels, depth, height, width = image.shape
+            image = F.interpolate(
+                image.reshape(channels * depth, 1, height, width),
+                size=self.size,
+                mode="bicubic",
+                antialias=True,
+                align_corners=False,
+            )
+            d[key] = image.reshape(channels, depth, *self.size)
+        return d
 
 
 class ToUint8D(mt.MapTransform):
