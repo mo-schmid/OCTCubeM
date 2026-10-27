@@ -59,7 +59,7 @@ class AlleyeMaculaDataModule(WebDatasetDataModule):
         return shards
 
     def _decode(self, sample: dict) -> dict:
-        return {"image": np.load(io.BytesIO(sample["npy"]))}
+        return {"image": np.load(io.BytesIO(sample["npy"])), "sample_id": sample["__key__"]}
 
     def _build_preprocess(self) -> list:
         # the decoded array has no metadata to say it lacks a channel axis

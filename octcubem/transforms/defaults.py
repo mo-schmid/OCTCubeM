@@ -186,17 +186,36 @@ class InPlaneAugment(mt.Compose):
         )
 
 
+class RandDepthFlipD(mt.RandomizableTransform, mt.MapTransform):
+    """Reverses the B-scan order of a `(C, D, H, W)` image with probability `prob`, and
+    records it as a bool `depth_flipped` -- what maps a per-depth result back to the stored B-scans.
+    """
+
+    def __init__(self, keys: Sequence[str] = ("image",), prob: float = 0.5):
+        mt.MapTransform.__init__(self, keys)
+        mt.RandomizableTransform.__init__(self, prob)
+
+    def __call__(self, data):
+        d = dict(data)
+        self.randomize(None)
+        for key in self.key_iterator(d):
+            if self._do_transform:
+                d[key] = torch.flip(torch.as_tensor(d[key]), dims=[1])
+        d["depth_flipped"] = self._do_transform
+        return d
+
+
 class FlipAugment(mt.Compose):
     """Random flips along depth and left-right, each drawn independently, image keys only.
 
-    OCTCube's pretraining augmentation (its `create_3d_transforms`). Ends in
-    `ToUint8D`, so the sample stays uint8 for `normalize`.
+    OCTCube's pretraining augmentation (its `create_3d_transforms`). The depth flip is
+    recorded as `depth_flipped`. Ends in `ToUint8D`, so the sample stays uint8 for `normalize`.
     """
 
     def __init__(self, keys: Sequence[str] = ("image",), prob: float = 0.5):
         super().__init__(
             [
-                mt.RandFlipD(keys=keys, spatial_axis=0, prob=prob),
+                RandDepthFlipD(keys=keys, prob=prob),
                 mt.RandFlipD(keys=keys, spatial_axis=2, prob=prob),
                 ToUint8D(keys=keys),
             ]
