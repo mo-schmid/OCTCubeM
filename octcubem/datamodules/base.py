@@ -1,4 +1,3 @@
-
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -10,8 +9,8 @@ from monai.data import Dataset, PersistentDataset
 from monai.data.utils import pickle_hashing
 from torch.utils.data import DataLoader, default_collate
 
-from retimod.data.splitting import grouped_stratified_split
-from retimod.data.transforms.defaults import normalize
+from octcubem.datamodules.splitting import grouped_stratified_split
+from octcubem.transforms.defaults import normalize
 
 
 class IndexFileDataModule(pl.LightningDataModule):
@@ -146,7 +145,7 @@ class IndexFileDataModule(pl.LightningDataModule):
         # (see TmpFS in slurm.conf); outside SLURM, TMPDIR is unset and we fall
         # back to no caching rather than guessing at a local path.
         tmpdir = os.environ.get("TMPDIR")
-        return str(Path(tmpdir) / f"retimod_{self.CACHE_NAME}_cache") if tmpdir else None
+        return str(Path(tmpdir) / f"octcubem_{self.CACHE_NAME}_cache") if tmpdir else None
 
     def _build_dataloader(self, dataset: Dataset, shuffle: bool = False):
         return DataLoader(
