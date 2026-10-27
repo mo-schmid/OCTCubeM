@@ -26,6 +26,8 @@ dependencies = [
     "simplejson>=4.2.0",
     "iopath>=0.1.10",
     "monai>=1.6.1",
+    "dvc>=3.67.1",
+    "dvc-ssh>=4.3.0",
 ]
 
 [tool.uv.sources]
