@@ -7,27 +7,35 @@
 # --------------------------------------------------------
 # Lightning pre-training of OCTCube on alleye-macula (3D only), initialised from
 # RETFound. Hyperparameters follow run_chunks_pretraining_vitl_oph_joint_flash_attn.sh,
-# except the depth: 48 B-scans (centre-cropped from 49, never resized).
+# except the depth: 48 B-scans (centre-cropped from 49, never resized), and a 5-epoch
+# warmup instead of 1. The effective batch size of 4 is the same, on 1 GPU instead of 4.
 #
 # Submit from Pre-training/:  sbatch scripts/run_pretrain_lightning_alleye.sh
-# --ntasks-per-node must equal --gpus-per-node: Lightning runs one process per GPU.
+# --ntasks-per-node and --devices must equal the number of GPUs in --gres: Lightning runs one process per GPU.
 # --------------------------------------------------------
 
-#SBATCH --job-name=octcube-pretrain
-#SBATCH --partition=YOUR_GPU_PARTITION
-#SBATCH --account=YOUR_ACCOUNT
-#SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
-#SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=8
-#SBATCH --mem-per-cpu=8G
-#SBATCH --time=24:00:00
-#SBATCH --output=logs/%x-%j.out
+#SBATCH --job-name=octcube_pretrain_original
+#SBATCH --time=48:00:00
+#SBATCH --output=/storage/homefs/ms22q288/logs/ubelix/%j-%x.out
+
+#SBATCH --account=invest
+#SBATCH --partition=gpu-invest
+#SBATCH --qos=job_gpu_caim
+# #SBATCH --qos=job_gpu_sznitman
+# #SBATCH --gres=gpu:h100:1
+#SBATCH --gres=gpu:rtx4090:1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-gpu=16
+#SBATCH --mem-per-gpu=90G
+
 
 DATA_DIR=../data/alleye-macula_n30000
 RETFOUND_CKPT=../ckpt/RETFound_mae_natureOCT.pth
 
-BSZ=1
+# effective batch size = BSZ * ACCUMSTEPS * GPUs = 4 * 1 * 1, as in the original
+# launch script (1 per GPU on 4 GPUs) -- so the same lr, blr * 4 / 256 = 2.5e-5.
+# Batch size 4 takes ~8.6 GB on an RTX 4090 (profile_pretrain.py).
+BSZ=4
 INPUTSIZE=256
 NUMFRAMES=48
 ACCUMSTEPS=1
@@ -52,15 +60,15 @@ srun python main_pretrain_lightning.py \
         --blr $BLR \
         --mask_ratio $RATIO \
         --weight_decay 0.05 \
-        --num_workers $SLURM_CPUS_PER_TASK \
+        --num_workers ${SLURM_CPUS_PER_GPU:-8} \
         --num_frames $NUMFRAMES \
         --t_patch_size 3 \
         --pred_t_dim $NUMFRAMES \
         --input_size $INPUTSIZE \
-        --warmup_epochs 1 \
+        --warmup_epochs 5 \
         --resume_type retfound_2_flash_attn \
         --resume $RETFOUND_CKPT \
         --model flash_attn_mae_vit_large_patch16 \
-        --devices $SLURM_NTASKS_PER_NODE \
+        --devices 1 \
         --num_nodes $SLURM_NNODES \
         --wandb_project retimod
